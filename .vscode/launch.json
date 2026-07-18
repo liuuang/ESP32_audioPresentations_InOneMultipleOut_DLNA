@@ -12,21 +12,21 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug",
-            "executable": "D:/USER/61166/Documents/Obsidian笔记/我的笔记/03.计划和项目分区/计算机技术/嵌入式项目/08-DLNA蓝牙音频播放进一出多蓝牙/DLNA/.pio/build/master/firmware.elf",
-            "projectEnvName": "master",
+            "executable": "D:/USER/61166/Documents/Obsidian笔记/我的笔记/03.计划和项目分区/计算机技术/嵌入式项目/08-DLNA蓝牙音频播放进一出多蓝牙/DLNA/.pio/build/slave/firmware.elf",
+            "projectEnvName": "slave",
             "toolchainBinDir": "C:/Users/61166/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "preLaunchTask": {
                 "type": "PlatformIO",
-                "task": "Pre-Debug (master)"
+                "task": "Pre-Debug (slave)"
             }
         },
         {
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (skip Pre-Debug)",
-            "executable": "D:/USER/61166/Documents/Obsidian笔记/我的笔记/03.计划和项目分区/计算机技术/嵌入式项目/08-DLNA蓝牙音频播放进一出多蓝牙/DLNA/.pio/build/master/firmware.elf",
-            "projectEnvName": "master",
+            "executable": "D:/USER/61166/Documents/Obsidian笔记/我的笔记/03.计划和项目分区/计算机技术/嵌入式项目/08-DLNA蓝牙音频播放进一出多蓝牙/DLNA/.pio/build/slave/firmware.elf",
+            "projectEnvName": "slave",
             "toolchainBinDir": "C:/Users/61166/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart"
         },
@@ -34,8 +34,8 @@
             "type": "platformio-debug",
             "request": "launch",
             "name": "PIO Debug (without uploading)",
-            "executable": "D:/USER/61166/Documents/Obsidian笔记/我的笔记/03.计划和项目分区/计算机技术/嵌入式项目/08-DLNA蓝牙音频播放进一出多蓝牙/DLNA/.pio/build/master/firmware.elf",
-            "projectEnvName": "master",
+            "executable": "D:/USER/61166/Documents/Obsidian笔记/我的笔记/03.计划和项目分区/计算机技术/嵌入式项目/08-DLNA蓝牙音频播放进一出多蓝牙/DLNA/.pio/build/slave/firmware.elf",
+            "projectEnvName": "slave",
             "toolchainBinDir": "C:/Users/61166/.platformio/packages/toolchain-xtensa-esp32/bin",
             "internalConsoleOptions": "openOnSessionStart",
             "loadMode": "manual"
