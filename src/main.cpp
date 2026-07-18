@@ -12,8 +12,8 @@
 #include <Audio.h>
 
 // ===== 用户配置 =====
-const char* WIFI_SSID = "szlxy";
-const char* WIFI_PWD  = "26180505";
+#include "wifi_config.h"
+
 #define I2S_BCK  26
 #define I2S_WS   25
 #define I2S_DATA 27
