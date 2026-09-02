@@ -1,13 +1,11 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 #include <math.h>
-#define I2S_BCK 2
-#define I2S_WS 3
-#define I2S_DATA 4
- 
+#include "config.h"   // WiFi/端口/引脚统一配置
+
 void setup() {
   Serial.begin(115200); delay(500);
-  Serial.println("I2S 测试 S3 v2");
+  Serial.println("I2S 测试 S3 v3 (MCLK)");
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = 44100,
@@ -19,17 +17,19 @@ void setup() {
     .dma_buf_len = 600,
     .use_apll = false,
     .tx_desc_auto_clear = true,
+    .fixed_mclk = 0
   };
   i2s_pin_config_t pin = {
+    .mck_io_num = I2S_MCK,
     .bck_io_num = I2S_BCK,
     .ws_io_num = I2S_WS,
     .data_out_num = I2S_DATA,
-    .data_in_num = I2S_PIN_NO_CHANGE,
-    .mclk_io_num = I2S_PIN_NO_CHANGE
+    .data_in_num = I2S_PIN_NO_CHANGE
   };
   Serial.print("install: "); Serial.println(i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL));
   Serial.print("set_pin: "); Serial.println(i2s_set_pin(I2S_NUM_0, &pin));
-  Serial.println("发声测试...");
+  i2s_set_clk(I2S_NUM_0, 44100, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+  Serial.println("发声测试 (MCLK=GPIO5)");
 }
 
 void loop() {

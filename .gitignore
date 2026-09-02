@@ -1,4 +1,11 @@
-﻿# 本地 WiFi 配置（含密码）
+# 本地真实配置（含 WiFi 密码）—— 不上传
+src/config.h
+# 旧版配置名（兼容保护，防止历史误传）
 src/wifi_config.h
+# VS Code 本地配置（含用户绝对路径，不上传）
+.vscode/
+# 蓝牙对照测试（S3 不支持经典蓝牙 A2DP，编译不过；本地保留实验）
+src/test_bt_s3.cpp
+lib/btAudio/
 # PlatformIO 构建产物
 .pio/

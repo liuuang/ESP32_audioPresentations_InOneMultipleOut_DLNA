@@ -4,42 +4,116 @@
 #include <WiFiUDP.h>
 #include <ESPmDNS.h>
 #include <Audio.h>
+#include <esp32-hal-psram.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
-#include "wifi_config.h"
+#include "config.h"   // WiFi/端口/引脚统一配置（真实值，gitignore 不上传）
 
-#define I2S_BCK  26
-#define I2S_WS   25
-#define I2S_DATA 27
+// 固定音源：开机自动播放，无需手动输入 URL
+// 用 http 直链（ESP32-audioI2S 对 https 流有崩溃问题）
+// 换台：直接改这一行 URL 即可
+#define STREAM_URL "http://ice1.somafm.com/groovesalad-128-mp3"
 
 WebServer server(80);
 WiFiUDP udpUpnp;  // only for UPnP
 Audio audio;
 
-// ============ 底层 UDP 广播（独立于 WiFiUDP 类） ============
-void udpBroadcast(const uint8_t* data, size_t len, uint16_t port) {
-  int sock = socket(AF_INET, SOCK_DGRAM, 0);
-  if (sock < 0) return;
+// ============ 从机注册表（广播被 AP 隔离时改单播） ============
+#define MAX_SLAVES 8
+IPAddress slaveIPs[MAX_SLAVES];
+int slaveCount = 0;
+int regSock = -1;
+
+void addSlave(uint32_t ip) {
+  IPAddress a(ip);
+  for (int i = 0; i < slaveCount; i++)
+    if (slaveIPs[i] == a) return;  // 已注册
+  if (slaveCount >= MAX_SLAVES) return;
+  slaveIPs[slaveCount++] = a;
+  Serial.printf("从机注册 #%d: %s\n", slaveCount, a.toString().c_str());
+}
+
+void initRegSock() {
+  regSock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (regSock < 0) { Serial.println("reg socket 失败"); return; }
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(REG_PORT);
+  addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  bind(regSock, (struct sockaddr*)&addr, sizeof(addr));
+  // 非阻塞：没包时立即返回
+  int fl = fcntl(regSock, F_GETFL, 0);
+  fcntl(regSock, F_SETFL, fl | O_NONBLOCK);
+  Serial.printf("注册监听: port %d\n", REG_PORT);
+}
+
+void pollRegistrations() {
+  if (regSock < 0) return;
+  struct sockaddr_in from;
+  socklen_t flen = sizeof(from);
+  uint8_t buf[64];
+  int n = recvfrom(regSock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &flen);
+  if (n > 0) addSlave(from.sin_addr.s_addr);
+}
+
+// ============ 底层 UDP 发送：优先单播从机，无从机时广播 ============
+// 注意：socket 只在启动时创建一次并复用（音频回调里频繁 socket()/close() 会造成
+// 巨大开销导致数据抖动 -> "slow stream, dropouts" -> 从机声音突突）
+int txSock = -1;
+
+void initTxSock() {
+  txSock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (txSock < 0) { Serial.println("tx socket 失败"); return; }
   int opt = 1;
-  setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+  setsockopt(txSock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+}
+
+void udpBroadcast(const uint8_t* data, size_t len, uint16_t port) {
+  if (txSock < 0) return;
   struct sockaddr_in addr;
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
-  sendto(sock, data, len, 0, (struct sockaddr*)&addr, sizeof(addr));
-  close(sock);
+
+  if (slaveCount > 0) {
+    for (int i = 0; i < slaveCount; i++) {
+      addr.sin_addr.s_addr = (uint32_t)slaveIPs[i];
+      sendto(txSock, data, len, 0, (struct sockaddr*)&addr, sizeof(addr));
+    }
+  } else {
+    addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+    sendto(txSock, data, len, 0, (struct sockaddr*)&addr, sizeof(addr));
+  }
 }
 
 // ============ PCM 回调 ============
+// 每包最大 1200 字节 PCM（原 512 太碎，一帧 2304B 拆 5 包 -> 收发开销大、
+// 到达突刺明显；1200B 拆 2 包更平滑）。UDP 载荷 < 1472 安全。
+#define PCM_CHUNK 1200
 void codex_audio_callback(int16_t* buff, uint16_t len) {
-  static uint8_t pkt[520];
+  static uint8_t pkt[PCM_CHUNK + 8];
+  static int16_t mono[2048];
   static uint32_t seq = 0; seq++;
-  uint16_t remain = len * 2;
-  uint16_t offset = 0;
-  uint8_t* bytes = (uint8_t*)buff;
+  static uint32_t lastLog = 0;
+  // 链路统一单声道：立体声源下混 (L+R)/2，再衰减一档留 6dB headroom。
+  // 原因：互联网电台响度大（峰值常年近 0dBFS），满幅下混会在后级削波，
+  // 低音失真。留余量后数字域永不削，响度靠音箱音量补偿。
+  // len 是“帧数”（每声道采样数）；单声道每帧 2 字节。
+  uint16_t ch = audio.getChannels();
+  const int16_t* send = buff;
+  uint16_t n = len;
+  if (ch != 1) {                        // 0 或 2：按立体声下混（首帧兜底也算立体声）
+    if (n > 2048) n = 2048;             // 立体声帧数不可能超过缓冲一半，防御
+    for (uint16_t i = 0; i < n; i++)
+      mono[i] = (int16_t)(((int32_t)buff[2*i] + buff[2*i+1]) >> 2);  // /4 = 6dB 余量
+    send = mono;
+  }                                     // 已是单声道源：原样透传
+  uint32_t remain = (uint32_t)n * 2;    // 16bit 单声道
+  uint32_t offset = 0;
+  uint8_t* bytes = (uint8_t*)send;
   while (remain > 0) {
-    uint16_t chunk = (remain > 512) ? 512 : remain;
+    uint32_t chunk = (remain > PCM_CHUNK) ? PCM_CHUNK : remain;
     memset(pkt, 0, 8);
     memcpy(pkt, &seq, 4);
     memcpy(pkt+4, &offset, 2);
@@ -48,6 +122,11 @@ void codex_audio_callback(int16_t* buff, uint16_t len) {
     udpBroadcast(pkt, chunk + 8, 12346);
     offset += chunk;
     remain -= chunk;
+  }
+  // 周期日志：确认广播在跑（每 100 帧打印一次）
+  if (seq - lastLog >= 100) {
+    lastLog = seq;
+    Serial.printf("PCM broadcast: seq=%u len=%u\n", seq, len);
   }
 }
 
@@ -137,9 +216,34 @@ void handleAVTransport() {
 }
 
 // ============ Setup/Loop ============
+// 开机 PSRAM 自检：编译是否启用 + 运行时可否申请，串口报告
+void psramSelfTest() {
+#ifdef BOARD_HAS_PSRAM
+  Serial.println("PSRAM 编译开关: ON (BOARD_HAS_PSRAM)");
+#else
+  Serial.println("PSRAM 编译开关: OFF (未设 BOARD_HAS_PSRAM)");
+#endif
+  bool ok = psramInit();
+  Serial.printf("PSRAM init: %s  total=%uB free=%uB\n",
+                ok ? "OK" : "FAIL",
+                (unsigned)ESP.getPsramSize(), (unsigned)ESP.getFreePsram());
+  if (ok) {
+    uint8_t* p = (uint8_t*)ps_malloc(2048);
+    if (p) {
+      p[0] = 0x55; p[2047] = 0xAA;   // 写读校验
+      Serial.printf("PSRAM alloc 2KB: OK (%02X..%02X)\n", p[0], p[2047]);
+      free(p);
+    } else {
+      Serial.println("PSRAM alloc 2KB: FAIL");
+    }
+  }
+}
+
 void setup() {
   Serial.begin(115200); delay(1000);
   Serial.println("\n===== DLNA 主节点 =====");
+  psramSelfTest();   // 开机即报 PSRAM 状态，等 2 秒再往下走，方便看清
+  delay(2000);
 
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   for (int i=0; i<40 && WiFi.status()!=WL_CONNECTED; i++) { delay(500); Serial.print("."); }
@@ -155,14 +259,25 @@ void setup() {
 
   udpUpnp.begin(1900); sendUPnPNotify();
 
+  initRegSock();  // 监听从机 HELLO 注册
+  initTxSock();   // 持久 UDP 发送 socket（避免回调里频繁建/拆）
+
   audio.setPinout(I2S_BCK,I2S_WS,I2S_DATA);
-  audio.setBufsize(1024*8,1024*8);
-  audio.setVolume(15);
+  // 流缓冲：内部输入环形缓冲(压缩音频)。8KB≈0.5s 太浅，源站一抖就断；
+  // 64KB≈4s(128kbps)，短暂停顿由主机吸收，不再传导到从机。
+  // (板载 PSRAM 为 OCT 版，预编译核仅支持 QUAD 用不上，故用内部 RAM)
+  audio.setBufsize(1024*64, 0);   // RAM 缓冲，需在音频初始化前设
+  audio.setVolume(10);   // 下混已留 6dB 余量，音量可回正常
   Serial.println("==========================");
+
+  // 自动播放固定音源（通过性测试：开机即推流，从机出声/LED 即链路通）
+  audio.connecttohost(STREAM_URL);
+  Serial.print("自动播放: "); Serial.println(STREAM_URL);
 }
 
 void loop() {
   static uint32_t tick = 0;
   server.handleClient(); handleUPnPSearch(); audio.loop();
+  pollRegistrations();  // 接收从机 HELLO
   if (millis()-tick > 30000) { sendUPnPNotify(); tick = millis(); }
 }
