@@ -1,0 +1,8 @@
+{
+  "name": "distribute",
+  "version": "1.0.0",
+  "description": "分发层: 主机 PCM 流发送接口 (单播/组播可切换)",
+  "keywords": "udp,multicast,audio,pcm",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

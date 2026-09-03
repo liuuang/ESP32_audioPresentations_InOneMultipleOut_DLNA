@@ -1,0 +1,8 @@
+{
+  "name": "i2s_dac",
+  "version": "1.0.0",
+  "description": "I2S 驱动层: 输出 PCM 到 I2S DAC (PCM5102), S3 MCLK 支持",
+  "keywords": "i2s,dac,pcm5102,mclk",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

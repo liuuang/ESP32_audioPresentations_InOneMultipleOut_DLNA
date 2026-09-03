@@ -15,3 +15,4 @@
 // ===== 网络（一般不用改）=====
 #define AUDIO_PORT 12346   // PCM 音频流端口（主机发 / 从机收）
 #define REG_PORT   12345   // 从机 HELLO 注册端口（主机监听）
+#define MAX_SLAVES 15      // 主机最多支持从机数

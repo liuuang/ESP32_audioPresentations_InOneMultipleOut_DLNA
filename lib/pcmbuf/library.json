@@ -1,0 +1,8 @@
+{
+  "name": "pcmbuf",
+  "version": "1.0.0",
+  "description": "环形 PCM 抖动缓冲 (可放内部 RAM 或 PSRAM)",
+  "keywords": "ringbuffer,audio,pcm,psram",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

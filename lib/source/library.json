@@ -1,0 +1,8 @@
+{
+  "name": "source",
+  "version": "1.0.0",
+  "description": "音源层: 音频输入统一接口 (URL/DLNA/蓝牙可切换), 输出 PCM 回调",
+  "keywords": "audio,mp3,dlna,bluetooth,url,stream",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}

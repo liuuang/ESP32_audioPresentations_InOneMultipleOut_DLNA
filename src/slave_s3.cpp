@@ -1,60 +1,35 @@
+// ============================================================
+// slave_s3.cpp — S3 从节点（应用层）
+// 架构: UDP 收包 → PCMBuf(PSRAM 环形缓冲) → 单声道扩立体声 → I2SDAC
+// 分层: pcmbuf + i2s_dac 库, 本文件只做组装与 UDP 收包任务
+// ============================================================
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
-#include <driver/i2s.h>
-#include "config.h"   // WiFi/端口统一配置（真实值，gitignore 不上传）
+#include "config.h"      // WiFi/端口（真实值，gitignore）
+#include "pcmbuf.h"
+#include "i2s_dac.h"
 
 // ===== S3 从机 I2S 引脚（S3 -> PCM5102）=====
-// S3 支持 MCLK 输出：GPIO47 -> 模块 SCK（PCM5102 需要系统时钟）
 #define I2S_BCK  21
 #define I2S_WS   19
 #define I2S_DATA 20
-#define I2S_MCK  47
+#define I2S_MCK  47     // S3 MCLK 输出 -> 模块 SCK
 
-#define FRAME_BYTES 3528
-
-// ============ 环形抖动缓冲（PSRAM 版） ============
-// 2MB PSRAM ≈ 23s 音频（单声道 88.2KB/s）。挪到 PSRAM 后释放内部 RAM。
-// 内部 RAM 只留指针，缓冲体在 PSRAM（ps_malloc）。
-#define RING_SIZE (2*1024*1024)  // 2MB
+#define RING_BYTES (2*1024*1024)   // PSRAM 环形缓冲 2MB ≈ 23s
 #define PLAY_START_THRESHOLD 16384 // 攒够 ~186ms 才开始播
-static uint8_t* ring = NULL;     // PSRAM 指针（setup 里 ps_malloc）
-static volatile uint32_t ringRd = 0;   // 读位置（I2S 消费）
-static volatile uint32_t ringWr = 0;   // 写位置（网络生产）
-static volatile uint32_t lostBytes = 0;
-
-uint32_t ringLen() { return (ringWr - ringRd + RING_SIZE) % RING_SIZE; }
-
-void ringPush(const uint8_t* d, uint32_t n) {
-  if (!ring || n >= RING_SIZE) return;
-  uint32_t wr = ringWr;
-  // 满则丢整块最旧，避免逐字节死循环
-  if (ringLen() + n > RING_SIZE - 2048) {
-    lostBytes += n;
-    return;   // 宁可丢新块，消费端会补零，不卡死
-  }
-  uint32_t s = (wr + n <= RING_SIZE) ? n : (RING_SIZE - wr);
-  memcpy((void*)(ring + wr), d, s);
-  if (s < n) memcpy(ring, d + s, n - s);
-  ringWr = (wr + n) % RING_SIZE;
-}
-
-// 从环形缓冲读出 len 字节到 dst（处理回绕）。仅消费方单线程调用。
-void ringRead(void* dst, uint32_t len) {
-  uint32_t s = (ringRd + len <= RING_SIZE) ? len : (RING_SIZE - ringRd);
-  memcpy(dst, ring + ringRd, s);
-  if (s < len) memcpy((uint8_t*)dst + s, ring, len - s);
-  ringRd = (ringRd + len) % RING_SIZE;
-}
 
 WiFiUDP udp;
+PCMBuf g_ring;               // 环形缓冲（PSRAM）
+I2SDAC g_dac;                // I2S DAC
+
 volatile uint32_t currentSeq = 0;
 volatile uint32_t lastFrameMs = 0;
 volatile uint32_t pktCount = 0;
 volatile uint32_t frameCount = 0;
-volatile uint32_t seqGaps = 0;   // seq 跳号计数（丢帧检测）
+volatile uint32_t seqGaps = 0;
 
-// ============ UDP 接收任务（高优先级，独立于 I2S 消费） ============
+// ============ UDP 接收任务（高优先级） ============
 static IPAddress masterIP;
 static bool haveMaster = false;
 
@@ -67,27 +42,19 @@ void sendHello(IPAddress ip) {
 void udpTask(void* pv) {
   uint32_t lastHello = 0;
   for (;;) {
-    // HELLO 频率：
-    // - 未注册（无主机）：每秒广播，加速被发现
-    // - 已注册但 >3s 无音频：主机可能重启/失联 → 回每秒广播，尽快重连
-    // - 正常播放中：每 5s 保活即可
-    bool stale = (millis() - lastFrameMs > 3000);   // 3 秒无新音频帧
+    // HELLO 频率：失联(>3s无音频)时每秒广播加速重连；正常每 5s 保活
+    bool stale = (millis() - lastFrameMs > 3000);
     uint32_t interval = (haveMaster && !stale) ? 5000 : 1000;
     if (millis() - lastHello > interval) {
       lastHello = millis();
       sendHello(IPAddress(255,255,255,255));
-      if (haveMaster && stale) {
-        Serial.println("[HELLO] 失联加速重连");
-      }
+      if (haveMaster && stale) Serial.println("[HELLO] 失联加速重连");
     }
-    // 内层循环：把 lwIP 缓冲里的包全部读完，避免积压溢出丢包
-    // （主机每帧发 2 包几乎同时到达，若只收 1 个就会正好丢一半）
+    // 内层循环清空 lwIP 缓冲，避免积压丢包
     int pkt = udp.parsePacket();
     while (pkt > 0) {
       pktCount++;
-      // 首包即回注册：从音频包源 IP 得知主机地址，单播 HELLO，
-      // 让主机立刻从“广播”切到“单播”，消除开机广播期的丢包卡顿
-      if (!haveMaster) {
+      if (!haveMaster) {   // 首包学到主机 IP，立刻单播回注册
         haveMaster = true;
         masterIP = udp.remoteIP();
         sendHello(masterIP);
@@ -105,56 +72,32 @@ void udpTask(void* pv) {
             lastFrameMs = millis();
           }
         }
-        ringPush(buf + 8, sz);
+        g_ring.push(buf + 8, sz);   // PCM 进 PSRAM 环形缓冲
       }
-      pkt = udp.parsePacket();   // 继续读下一个，直到清空
+      pkt = udp.parsePacket();
     }
-    vTaskDelay(1);   // 缓冲清空后再让出 CPU
+    vTaskDelay(1);
   }
 }
 
-void initI2S() {
-  i2s_config_t cfg = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = 44100,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-    .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_STAND_I2S | I2S_COMM_FORMAT_STAND_MSB),
-    .intr_alloc_flags = ESP_INTR_FLAG_IRAM,
-    .dma_buf_count = 8,
-    .dma_buf_len = 600,
-    .use_apll = false,
-    .tx_desc_auto_clear = true,
-    .fixed_mclk = 0
-  };
-  i2s_pin_config_t pin = {
-    .mck_io_num = I2S_MCK,
-    .bck_io_num = I2S_BCK,
-    .ws_io_num = I2S_WS,
-    .data_out_num = I2S_DATA,
-    .data_in_num = I2S_PIN_NO_CHANGE
-  };
-  i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &pin);
-  i2s_set_clk(I2S_NUM_0, 44100, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
-  i2s_zero_dma_buffer(I2S_NUM_0);
-  Serial.println("I2S 就绪 (MCLK=GPIO47)");
-}
-
+// ============ Setup/Loop ============
 void setup() {
   Serial.begin(115200); delay(1000);
-  Serial.println("\n===== S3 从节点 v7 (PSRAM缓冲) =====");
+  Serial.println("\n===== S3 从节点 v8 (模块化) =====");
 
-  // 环形缓冲放 PSRAM（512KB）；失败则退回内部 RAM 128KB
-  ring = (uint8_t*)ps_malloc(RING_SIZE);
-  if (ring) {
-    Serial.printf("环形缓冲: PSRAM %uKB\n", (unsigned)(RING_SIZE/1024));
-  } else {
-    Serial.println("PSRAM 分配失败，退回内部 RAM 128KB");
-    // 退回时需要小的静态缓冲——直接小环
-    Serial.println("WARN: 无 PSRAM 时需改回静态数组，此处暂停");
-    while(1) delay(1000);   // 明确失败：没有 PSRAM 的板子需改回 v6 静态数组版
+  // 环形缓冲 PSRAM 2MB
+  if (!g_ring.init(RING_BYTES, true)) {
+    Serial.println("PSRAM 环形缓冲分配失败!");
+    while(1) delay(1000);
   }
+  Serial.printf("环形缓冲: PSRAM %uKB\n", (unsigned)(RING_BYTES/1024));
+
+  // I2S DAC（S3 MCLK=47）
+  if (!g_dac.begin(I2S_BCK, I2S_WS, I2S_DATA, I2S_MCK, 44100)) {
+    Serial.println("I2S 初始化失败!");
+    while(1) delay(1000);
+  }
+  Serial.println("I2S 就绪 (MCLK=GPIO47)");
 
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   int r = 0;
@@ -163,11 +106,10 @@ void setup() {
     Serial.println("WiFi: " + WiFi.localIP().toString());
     WiFi.setSleep(false);
   } else { Serial.println("WiFi 失败"); return; }
-  initI2S();
+
   udp.begin(AUDIO_PORT);
   Serial.println("UDP 就绪");
 
-  // 创建 UDP 接收任务：核心1，优先级 3（高于 Arduino loopTask 的 1）
   xTaskCreatePinnedToCore(udpTask, "udpRx", 4096, NULL, 3, NULL, 1);
   Serial.println("UDP 任务已启动");
 }
@@ -177,12 +119,11 @@ void loop() {
   static uint32_t playStartMs = 0;
   static uint32_t lastStatMs = 0;
   static uint32_t bytesPlayed = 0;
-  static uint8_t zeros[2048] = {0};
-  static int16_t mSamples[512];   // 单声道临时（一次最多 512 采样）
-  static int16_t stereo[1024];    // 扩成左右声道：512 帧
+  static int16_t mSamples[512];    // 单声道临时
+  static int16_t stereo[1024];     // 扩展左右：512 帧
 
-  // ---- I2S 消费状态机（低优先级，UDP 收包不被它阻塞） ----
-  uint32_t avail = ringLen();
+  // ---- I2S 消费状态机 ----
+  uint32_t avail = g_ring.length();
   if (!playing) {
     if (avail >= PLAY_START_THRESHOLD) {
       playing = true;
@@ -191,24 +132,20 @@ void loop() {
     }
   } else {
     if (avail >= 2) {
-      uint32_t n = avail / 2;               // 可用单声道采样数
+      uint32_t n = avail / 2;               // 单声道采样数
       if (n > 512) n = 512;
-      ringRead(mSamples, n * 2);             // 从环形缓冲读走（单声道 PCM）
-      for (uint32_t i = 0; i < n; i++) {     // 单声道 → 左右同值喂 I2S
+      g_ring.read(mSamples, n * 2);
+      for (uint32_t i = 0; i < n; i++) {    // 单声道 → 左右同值
         int16_t v = mSamples[i];
         stereo[2*i] = v; stereo[2*i+1] = v;
       }
-      size_t w = 0;
-      i2s_write(I2S_NUM_0, stereo, n*4, &w, 20);  // 短超时，快速返回继续收包
+      size_t w = g_dac.write(stereo, n, 20);
       bytesPlayed += w;
-      uint32_t done = w / 4;                 // I2S 实际吃掉的帧数
-      if (done < n)                          // 没写掉的采样退回环形缓冲
-        ringRd = (ringRd - (n - done)*2 + RING_SIZE) % RING_SIZE;
       if (w > 0) lastFrameMs = millis();
+      // 注: 若 i2s_write 部分写入(慢流), 写不掉的采样直接丢弃——
+      // 迟到的数据补播会乱序, 不如丢(人耳对零星丢样不敏感)
     } else {
-      // 欠载：写一小段静音补零（短超时，别阻塞收包）
-      size_t wz = 0;
-      i2s_write(I2S_NUM_0, zeros, 1024, &wz, 10);
+      g_dac.writeZeros(1024, 10);           // 欠载补零
     }
     if (millis() - playStartMs > 1500 && millis() - lastFrameMs > 1500) {
       playing = false;
@@ -221,7 +158,8 @@ void loop() {
     lastStatMs = millis();
     Serial.printf("\n[STAT] pkt=%u frames=%u gaps=%u played=%uB ring=%uB lost=%uB\n",
                   (unsigned)pktCount, (unsigned)frameCount, (unsigned)seqGaps,
-                  (unsigned)bytesPlayed, (unsigned)ringLen(), (unsigned)lostBytes);
+                  (unsigned)bytesPlayed, (unsigned)g_ring.length(),
+                  (unsigned)g_ring.lost());
   }
   vTaskDelay(1);
 }
