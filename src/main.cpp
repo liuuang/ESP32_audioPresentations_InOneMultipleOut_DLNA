@@ -24,7 +24,7 @@ WiFiUDP udpUpnp;  // only for UPnP
 Audio audio;
 
 // ============ 从机注册表（广播被 AP 隔离时改单播） ============
-#define MAX_SLAVES 8
+#define MAX_SLAVES 15   // 最多 15 从机（7.1.4 十一声道 + 余量）
 IPAddress slaveIPs[MAX_SLAVES];
 int slaveCount = 0;
 int regSock = -1;
@@ -268,10 +268,9 @@ void setup() {
   initTxSock();   // 持久 UDP 发送 socket（避免回调里频繁建/拆）
 
   audio.setPinout(I2S_BCK,I2S_WS,I2S_DATA);
-  // 流缓冲：内部输入环形缓冲(压缩音频)。8KB≈0.5s 太浅，源站一抖就断；
-  // 64KB≈4s(128kbps)，短暂停顿由主机吸收，不再传导到从机。
-  // (板载 PSRAM 为 OCT 版，预编译核仅支持 QUAD 用不上，故用内部 RAM)
-  audio.setBufsize(1024*64, 0);   // RAM 缓冲，需在音频初始化前设
+  // 流缓冲(压缩音频)：第一参数=内部RAM，第二参数=PSRAM。
+  // PSRAM 2MB ≈ 120s(128kbps) 缓冲，源站长时间停顿也由主机吸收。
+  audio.setBufsize(0, 2*1024*1024);   // RAM 不变(0=默认)，PSRAM 2MB
   audio.setVolume(10);   // 下混已留 6dB 余量，音量可回正常
   Serial.println("==========================");
 

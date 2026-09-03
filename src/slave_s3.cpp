@@ -13,10 +13,12 @@
 
 #define FRAME_BYTES 3528
 
-// ============ 环形抖动缓冲 ============
-#define RING_SIZE 131072         // 128KB。链路是 16bit 单声道(88.2KB/s)，≈1.5s 音频
+// ============ 环形抖动缓冲（PSRAM 版） ============
+// 2MB PSRAM ≈ 23s 音频（单声道 88.2KB/s）。挪到 PSRAM 后释放内部 RAM。
+// 内部 RAM 只留指针，缓冲体在 PSRAM（ps_malloc）。
+#define RING_SIZE (2*1024*1024)  // 2MB
 #define PLAY_START_THRESHOLD 16384 // 攒够 ~186ms 才开始播
-static uint8_t ring[RING_SIZE];
+static uint8_t* ring = NULL;     // PSRAM 指针（setup 里 ps_malloc）
 static volatile uint32_t ringRd = 0;   // 读位置（I2S 消费）
 static volatile uint32_t ringWr = 0;   // 写位置（网络生产）
 static volatile uint32_t lostBytes = 0;
@@ -24,7 +26,7 @@ static volatile uint32_t lostBytes = 0;
 uint32_t ringLen() { return (ringWr - ringRd + RING_SIZE) % RING_SIZE; }
 
 void ringPush(const uint8_t* d, uint32_t n) {
-  if (n >= RING_SIZE) return;
+  if (!ring || n >= RING_SIZE) return;
   uint32_t wr = ringWr;
   // 满则丢整块最旧，避免逐字节死循环
   if (ringLen() + n > RING_SIZE - 2048) {
@@ -65,11 +67,18 @@ void sendHello(IPAddress ip) {
 void udpTask(void* pv) {
   uint32_t lastHello = 0;
   for (;;) {
-    // 未注册前每秒广播 HELLO 加速发现；已注册后每 5s 保活即可
-    uint32_t interval = haveMaster ? 5000 : 1000;
+    // HELLO 频率：
+    // - 未注册（无主机）：每秒广播，加速被发现
+    // - 已注册但 >3s 无音频：主机可能重启/失联 → 回每秒广播，尽快重连
+    // - 正常播放中：每 5s 保活即可
+    bool stale = (millis() - lastFrameMs > 3000);   // 3 秒无新音频帧
+    uint32_t interval = (haveMaster && !stale) ? 5000 : 1000;
     if (millis() - lastHello > interval) {
       lastHello = millis();
       sendHello(IPAddress(255,255,255,255));
+      if (haveMaster && stale) {
+        Serial.println("[HELLO] 失联加速重连");
+      }
     }
     // 内层循环：把 lwIP 缓冲里的包全部读完，避免积压溢出丢包
     // （主机每帧发 2 包几乎同时到达，若只收 1 个就会正好丢一半）
@@ -134,7 +143,19 @@ void initI2S() {
 
 void setup() {
   Serial.begin(115200); delay(1000);
-  Serial.println("\n===== S3 从节点 v6 (无LED) =====");
+  Serial.println("\n===== S3 从节点 v7 (PSRAM缓冲) =====");
+
+  // 环形缓冲放 PSRAM（512KB）；失败则退回内部 RAM 128KB
+  ring = (uint8_t*)ps_malloc(RING_SIZE);
+  if (ring) {
+    Serial.printf("环形缓冲: PSRAM %uKB\n", (unsigned)(RING_SIZE/1024));
+  } else {
+    Serial.println("PSRAM 分配失败，退回内部 RAM 128KB");
+    // 退回时需要小的静态缓冲——直接小环
+    Serial.println("WARN: 无 PSRAM 时需改回静态数组，此处暂停");
+    while(1) delay(1000);   // 明确失败：没有 PSRAM 的板子需改回 v6 静态数组版
+  }
+
   WiFi.begin(WIFI_SSID, WIFI_PWD);
   int r = 0;
   while (WiFi.status() != WL_CONNECTED && r < 30) { delay(500); Serial.print("."); r++; }
@@ -143,7 +164,7 @@ void setup() {
     WiFi.setSleep(false);
   } else { Serial.println("WiFi 失败"); return; }
   initI2S();
-  udp.begin(12346);
+  udp.begin(AUDIO_PORT);
   Serial.println("UDP 就绪");
 
   // 创建 UDP 接收任务：核心1，优先级 3（高于 Arduino loopTask 的 1）
