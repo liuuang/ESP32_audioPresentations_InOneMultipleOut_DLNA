@@ -1,7 +1,13 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 #include <math.h>
-#include "config.h"   // WiFi/端口/引脚统一配置
+#include "config.h"   // WiFi/端口统一配置
+
+// ===== S3 I2S 测试引脚（S3 -> PCM5102）=====
+#define I2S_BCK  21
+#define I2S_WS   19
+#define I2S_DATA 20
+#define I2S_MCK  47   // MCLK 输出 -> 接模块 SCK
 
 void setup() {
   Serial.begin(115200); delay(500);

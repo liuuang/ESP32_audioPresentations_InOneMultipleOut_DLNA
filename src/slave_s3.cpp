@@ -2,7 +2,14 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <driver/i2s.h>
-#include "config.h"   // WiFi/端口/引脚统一配置（真实值，gitignore 不上传）
+#include "config.h"   // WiFi/端口统一配置（真实值，gitignore 不上传）
+
+// ===== S3 从机 I2S 引脚（S3 -> PCM5102）=====
+// S3 支持 MCLK 输出：GPIO47 -> 模块 SCK（PCM5102 需要系统时钟）
+#define I2S_BCK  21
+#define I2S_WS   19
+#define I2S_DATA 20
+#define I2S_MCK  47
 
 #define FRAME_BYTES 3528
 

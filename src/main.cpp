@@ -7,7 +7,12 @@
 #include <esp32-hal-psram.h>
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
-#include "config.h"   // WiFi/端口/引脚统一配置（真实值，gitignore 不上传）
+#include "config.h"   // WiFi/端口统一配置（真实值，gitignore 不上传）
+
+// 主机 I2S 引脚（主机不接 DAC，仅库需要占位；值随意）
+#define I2S_BCK  21
+#define I2S_WS   19
+#define I2S_DATA 20
 
 // 固定音源：开机自动播放，无需手动输入 URL
 // 用 http 直链（ESP32-audioI2S 对 https 流有崩溃问题）
