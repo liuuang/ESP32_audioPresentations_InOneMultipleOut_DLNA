@@ -27,4 +27,5 @@ private:
   Audio m_audio;
   SourcePCMCallback m_cb = NULL;
   int m_bck, m_ws, m_data;
+  bool m_audioStarted = false;
 };

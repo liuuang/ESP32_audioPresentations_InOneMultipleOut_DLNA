@@ -1,0 +1,11 @@
+{
+  "name": "control",
+  "version": "1.0.0",
+  "description": "控制面: Web 页面 + UPnP/DLNA 发现 + 自动播放 (主机侧)",
+  "keywords": "web,upnp,dlna,control",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [
+    { "name": "source" }
+  ]
+}

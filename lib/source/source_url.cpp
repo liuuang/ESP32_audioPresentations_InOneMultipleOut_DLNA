@@ -19,10 +19,14 @@ SourceURL::SourceURL(int bck, int ws, int data)
 }
 
 bool SourceURL::play(const char* url) {
-  m_audio.setPinout(m_bck, m_ws, m_data);
-  // PSRAM 流缓冲 2MB（压缩音频环形缓冲，需在 connect 前设）
-  m_audio.setBufsize(0, 2 * 1024 * 1024);
-  return m_audio.connecttohost(url);
+  if (!m_audioStarted) {
+    m_audio.setPinout(m_bck, m_ws, m_data);
+    // PSRAM 流缓冲 2MB（压缩音频环形缓冲，仅首次设置）
+    m_audio.setBufsize(0, 2 * 1024 * 1024);
+    m_audioStarted = true;
+  }
+  m_audio.connecttohost(url);
+  return true;   // connecttohost 返回 void，异步连接；真正成败由 isRunning 判定
 }
 
 void SourceURL::onPCM(const int16_t* pcm, uint16_t samples) {
