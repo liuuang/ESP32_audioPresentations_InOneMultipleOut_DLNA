@@ -30,5 +30,6 @@ bool SourceURL::play(const char* url) {
 }
 
 void SourceURL::onPCM(const int16_t* pcm, uint16_t samples) {
+  m_playedFrames += samples;   // 累加已播放帧数（自计时，进度条用）
   if (m_cb) m_cb(pcm, samples);
 }

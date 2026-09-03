@@ -26,4 +26,8 @@ public:
   virtual void setVolume(int v) = 0;
   // 声道数（1=单声道 2=立体声）
   virtual int channels() = 0;
+  // 播放进度（秒），用于 DLNA GetPositionInfo 位置同步；未知返回 0
+  virtual uint32_t positionSec() { return 0; }
+  // 当前曲目总时长（秒），未知（直播流/未解析）返回 0
+  virtual uint32_t durationSec() { return 0; }
 };

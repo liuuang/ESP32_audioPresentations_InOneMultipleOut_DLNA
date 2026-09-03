@@ -44,7 +44,7 @@ void onSourcePCM(const int16_t* pcm, uint16_t frames) {
   }
   g_pcmCount++;
   g_dist->sendPCM(send, n);
-  if ((g_pcmCount % 100) == 0)
+  if ((g_pcmCount % 1000) == 0)
     Serial.printf("PCM 分发: frame=%u\n", (unsigned)n);
 }
 
@@ -84,9 +84,9 @@ void setup() {
   if (MDNS.begin("esp32-audio")) { MDNS.addService("http","tcp",80); Serial.println("mDNS: esp32-audio.local"); }
 
   // ---- 分层接线 ----
-  g_dist = new DistributeUDP(AUDIO_PORT, REG_PORT, MAX_SLAVES);
+  g_dist = new DistributeUDP(AUDIO_PORT, REG_PORT, CTRL_PORT, MAX_SLAVES);
   g_dist->begin();
-  Serial.printf("分发层: UDP 单播 (audio=%d reg=%d max=%d)\n", AUDIO_PORT, REG_PORT, MAX_SLAVES);
+  Serial.printf("分发层: UDP (audio=%d reg=%d ctrl=%d max=%d)\n", AUDIO_PORT, REG_PORT, CTRL_PORT, MAX_SLAVES);
 
   g_source = new SourceURL(I2S_BCK, I2S_WS, I2S_DATA);
   g_source->setCallback(onSourcePCM);

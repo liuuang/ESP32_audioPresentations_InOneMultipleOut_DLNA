@@ -26,9 +26,12 @@ private:
   Source* m_src = NULL;
   Distribute* m_dist = NULL;
   WebServer m_server{80};
-  WiFiUDP m_udpUpnp;
+  WiFiUDP m_udpUpnp;        // 保留（网页 UPnP 用不到，暂留）
+  int m_ssdpSock = -1;      // SSDP 原生 socket（监听组播+响应）
   String m_name;
   String m_autoURL;
+  String m_lastURI;        // 最近一次 SetAVTransportURI 收到的曲目地址（GetMediaInfo 回显）
+  int m_volPct = 50;   // RenderingControl 音量 0-100（映射到 Source 的 0-21）
   bool m_autoPlayed = false;
   uint32_t m_lastPlayTry = 0;
   uint32_t m_lastNotify = 0;
@@ -39,7 +42,13 @@ private:
   void handleDesc();
   void handleSCPD();
   void handleAVTransport();
+  void handleCM();
+  void handleRC();
+  void handleEvent();
+  void handleSlaves();      // GET: 从机列表页（音量/延迟滑块）
+  void handleSlaveCtl();    // POST: 设置某从机 VOL/DLY
   void sendNotify();
+  void sendSearchResp(const IPAddress& ip, uint16_t port, const String& st, const String& usn);
   void handleSearch();
   void autoPlay();
 };

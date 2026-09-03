@@ -7,8 +7,8 @@
 
 #define PCM_CHUNK 1200   // 每包最大 PCM 字节（UDP 载荷 < 1472 安全）
 
-DistributeUDP::DistributeUDP(uint16_t audioPort, uint16_t regPort, int maxSlaves)
-  : m_audioPort(audioPort), m_regPort(regPort), m_max(maxSlaves) {}
+DistributeUDP::DistributeUDP(uint16_t audioPort, uint16_t regPort, uint16_t ctrlPort, int maxSlaves)
+  : m_audioPort(audioPort), m_regPort(regPort), m_ctrlPort(ctrlPort), m_max(maxSlaves) {}
 
 bool DistributeUDP::begin() {
   // 注册监听 socket（非阻塞）
@@ -28,6 +28,11 @@ bool DistributeUDP::begin() {
   if (m_txSock < 0) return false;
   int opt = 1;
   setsockopt(m_txSock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
+
+  // 控制通道发送 socket（复用，发给从机 CTRL_PORT）
+  m_ctrlSock = socket(AF_INET, SOCK_DGRAM, 0);
+  if (m_ctrlSock < 0) return false;
+  setsockopt(m_ctrlSock, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
   return true;
 }
 
@@ -86,4 +91,15 @@ void DistributeUDP::sendPCM(const int16_t* pcm, uint16_t samples) {
     offset += chunk;
     remain -= chunk;
   }
+}
+
+bool DistributeUDP::sendCtrl(const IPAddress& ip, const char* msg) {
+  if (m_ctrlSock < 0) return false;
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(m_ctrlPort);
+  addr.sin_addr.s_addr = (uint32_t)ip;
+  int n = sendto(m_ctrlSock, msg, strlen(msg), 0, (struct sockaddr*)&addr, sizeof(addr));
+  return n > 0;
 }

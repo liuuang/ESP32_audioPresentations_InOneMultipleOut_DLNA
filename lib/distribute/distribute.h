@@ -23,4 +23,8 @@ public:
   virtual void sendPCM(const int16_t* pcm, uint16_t samples) = 0;
   // 当前已注册从机数
   virtual int slaveCount() = 0;
+  // 取第 i 个从机 IP（网页列表/定向控制用）
+  virtual IPAddress slaveIP(int i) = 0;
+  // 向指定从机发控制消息（音量/延迟）
+  virtual bool sendCtrl(const IPAddress& ip, const char* msg) = 0;
 };
