@@ -27,4 +27,6 @@ public:
   virtual IPAddress slaveIP(int i) = 0;
   // 向指定从机发控制消息（音量/延迟）
   virtual bool sendCtrl(const IPAddress& ip, const char* msg) = 0;
+  // 从机在线状态（最近心跳距今 <6s 视为在线）；用于网页显示
+  virtual bool slaveOnline(int i) = 0;
 };

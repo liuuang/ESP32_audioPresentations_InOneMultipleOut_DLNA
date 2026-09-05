@@ -41,8 +41,35 @@ void DistributeUDP::addSlave(uint32_t ip) {
   for (int i = 0; i < m_count; i++)
     if (m_ips[i] == a) return;
   if (m_count >= m_max) return;
-  m_ips[m_count++] = a;
+  m_ips[m_count] = a;
+  m_states[m_count].ip = a;
+  m_states[m_count].lastSeen = millis();
+  m_count++;
   Serial.printf("从机注册 #%d: %s\n", m_count, a.toString().c_str());
+}
+
+// 解析从机心跳: "ST <ip>:<vol>:<dly>:<playing>:<ringKB>"
+void DistributeUDP::handleStatus(const IPAddress& from, const char* data, int len) {
+  // 找到对应从机
+  int idx = -1;
+  for (int i = 0; i < m_count; i++)
+    if (m_ips[i] == from) { idx = i; break; }
+  if (idx < 0) return;   // 未注册，忽略（注册走 HELLO）
+  // 跳过 "ST "
+  const char* p = data + 3;
+  // ip:vol:dly:playing:ringKB
+  // 第一个冒号前是 ip（跳过，用 from 即可）
+  int vol = m_states[idx].vol;
+  uint32_t dly = m_states[idx].delayMs;
+  int playing = m_states[idx].playing ? 1 : 0;
+  uint32_t ring = m_states[idx].ringKB;
+  if (sscanf(p, "%*[^:]:%d:%u:%d:%u", &vol, &dly, &playing, &ring) >= 3) {
+    m_states[idx].vol = constrain(vol, 0, 100);
+    m_states[idx].delayMs = dly;
+    m_states[idx].playing = (playing != 0);
+    m_states[idx].ringKB = ring;
+  }
+  m_states[idx].lastSeen = millis();
 }
 
 void DistributeUDP::loop() {
@@ -51,7 +78,14 @@ void DistributeUDP::loop() {
   socklen_t flen = sizeof(from);
   uint8_t buf[64];
   int n = recvfrom(m_regSock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &flen);
-  if (n > 0) addSlave(from.sin_addr.s_addr);
+  if (n <= 0) return;
+  IPAddress src(from.sin_addr.s_addr);
+  // HELLO → 注册；ST → 状态更新
+  if (n >= 5 && memcmp(buf, "HELLO", 5) == 0) {
+    addSlave(from.sin_addr.s_addr);
+  } else if (n >= 3 && memcmp(buf, "ST ", 3) == 0) {
+    handleStatus(src, (const char*)buf, n);
+  }
 }
 
 void DistributeUDP::sendChunk(const uint8_t* data, size_t len) {

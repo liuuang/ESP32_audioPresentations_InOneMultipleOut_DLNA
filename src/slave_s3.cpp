@@ -17,11 +17,12 @@
 #define I2S_MCK  47     // S3 MCLK 输出 -> 模块 SCK
 
 #define RING_BYTES (2*1024*1024)   // PSRAM 环形缓冲 2MB ≈ 23s
-#define PLAY_START_THRESHOLD 16384 // 攒够 ~186ms 才开始播（默认）
 // 延迟调节：目标水位 = 延迟ms × 单声道字节速率(88.2B/ms @44.1k 16bit)
 // 默认 0ms = 不额外延迟；设置 DLY 后从机等水位够才消费（多从机时间对齐用）
 static volatile uint32_t g_delayMs = 0;
-static volatile int g_volumePct = 100;   // 0-100，乘到 PCM 上（本地 DSP）
+// 上电默认音量 60%（安全策略：防止半夜上电最大声吓人/伤音箱）
+// 用户可通过网页调，当前会话内生效；持久化(存 flash)留 v1.1
+static volatile int g_volumePct = 60;
 
 WiFiUDP udp;
 WiFiUDP udpCtrl;             // 控制通道（收主机 VOL/DLY）
@@ -57,9 +58,25 @@ void handleCtrlMsg(const String& msg) {
   }
 }
 
-// 控制通道任务：只收控制消息，不碰音频
+// 控制通道任务：收主机 VOL/DLY + 每 2s 向主机回报状态心跳
 void ctrlTask(void* pv) {
+  uint32_t lastBeat = 0;
   for (;;) {
+    // 状态心跳：让主机网页显示从机在线/音量/延迟/出声状态
+    if (haveMaster && millis() - lastBeat > 2000) {
+      lastBeat = millis();
+      uint32_t ringKB = g_ring.length() / 1024;
+      // 格式: ST <ip>:<vol>:<dly>:<playing>:<ringKB>
+      char st[64];
+      snprintf(st, sizeof(st), "ST %s:%d:%u:%u:%u",
+               WiFi.localIP().toString().c_str(),
+               g_volumePct, (unsigned)g_delayMs,
+               (unsigned)(millis() - lastFrameMs < 3000 ? 1 : 0),
+               (unsigned)ringKB);
+      udp.beginPacket(masterIP, REG_PORT);
+      udp.print(st);
+      udp.endPacket();
+    }
     int pkt = udpCtrl.parsePacket();
     while (pkt > 0) {
       char buf[64]; memset(buf, 0, 64);
@@ -160,17 +177,18 @@ void loop() {
 
   // ---- I2S 消费状态机 ----
   uint32_t avail = g_ring.length();
-  // 延迟实现：目标水位 = 延迟ms × 88.2B/ms（单声道 44.1kHz）
-  uint32_t delayLevel = g_delayMs * 88 + 4096;   // +4KB 余量
+  // 延迟实现：目标水位 = 延迟ms × 88.2B/ms（单声道 44.1kHz, 约 88B/ms）
+  // 延迟语义：让本从机比"零延迟"晚播 delayMs —— 播放中也要维持该水位，
+  // 水位不足就补零等待（等效把声音往后推 delayMs），实现多从机相位对齐
+  uint32_t delayLevel = g_delayMs * 88 + 4096;   // +4KB 余量（含初始 186ms 阈值）
   if (!playing) {
-    // 未播放：需攒够 初始阈值 + 延迟水位 才开始（避免播放中被 DLY 打断卡壳）
-    if (avail >= PLAY_START_THRESHOLD + delayLevel) {
+    if (avail >= delayLevel) {
       playing = true;
       playStartMs = millis();
       Serial.printf(">>> 开始播放 (ring=%uB dly=%ums)\n", (unsigned)avail, g_delayMs);
     }
   } else {
-    if (avail >= 2) {
+    if (avail >= 2 && avail >= delayLevel) {
       uint32_t n = avail / 2;               // 单声道采样数
       if (n > 512) n = 512;
       g_ring.read(mSamples, n * 2);
@@ -184,7 +202,8 @@ void loop() {
       bytesPlayed += w;
       if (w > 0) lastFrameMs = millis();
     } else {
-      g_dac.writeZeros(1024, 10);           // 欠载补零
+      // 水位不足（含延迟目标未到）：补零维持 DMA，等待水位回升
+      g_dac.writeZeros(1024, 10);
     }
     if (millis() - playStartMs > 1500 && millis() - lastFrameMs > 1500) {
       playing = false;

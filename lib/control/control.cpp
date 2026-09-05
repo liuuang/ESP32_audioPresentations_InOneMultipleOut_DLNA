@@ -2,6 +2,7 @@
 // control.cpp — 控制面实现（Web + UPnP/DLNA + 自动播放）
 // ============================================================
 #include "control.h"
+#include "distribute_udp.h"   // 需要 SlaveState 做状态显示（downcast 使用）
 #include <ESPmDNS.h>
 #include <esp_log.h>
 
@@ -137,7 +138,27 @@ void ControlPanel::handleRoot() {
        ".val{font-size:13px;color:#aaa}.row{display:flex;justify-content:space-between;align-items:center}"
        "small{color:#888}</style></head><body>";
   h += "<h1>🎵 ESP32 音响</h1>";
-  h += "<div class='st'>" + s + " <small>" + WiFi.localIP().toString() + "</small></div>";
+  {
+    // 诚实时间信息：显示已播时长；总时长未知时标"直播/流媒体"不假装可拖动
+    String nowTxt = "—";
+    String durTxt = "";
+    uint32_t dur = (m_src) ? m_src->durationSec() : 0;
+    if (m_src && m_src->isRunning()) {
+      uint32_t pos = m_src->positionSec();
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%u:%02u", (unsigned)(pos/60), (unsigned)(pos%60));
+      nowTxt = buf;
+      if (dur > 0) {
+        char b2[24];
+        snprintf(b2, sizeof(b2), "%u:%02u", (unsigned)(dur/60), (unsigned)(dur%60));
+        durTxt = " / " + String(b2);
+      } else {
+        durTxt = " · 直播/流媒体";
+      }
+    }
+    h += "<div class='st'>" + s + " · 已播 " + nowTxt + durTxt +
+         " <small>" + WiFi.localIP().toString() + "</small></div>";
+  }
 
   // 播放控制
   h += "<div class='sec'>播放</div>";
@@ -147,42 +168,59 @@ void ControlPanel::handleRoot() {
   h += "<form action='/stop' method='POST'><button>⏹ 停止</button></form>";
 
   // 从机控制（直接嵌主页）
+  DistributeUDP* du = (m_dist) ? dynamic_cast<DistributeUDP*>(m_dist) : NULL;
   int n = m_dist ? m_dist->slaveCount() : 0;
-  h += "<div class='sec'>从机控制 (" + String(n) + ")</div>";
+  h += "<div class='sec'>从机控制 (" + String(n) + ")"
+       "<button style='margin-left:10px;background:#e05656' onclick='allMute()'>🔇 全静音</button>"
+       "<button style='margin-left:6px;background:#2ecc71' onclick='allRestore()'>🔊 恢复</button></div>";
   if (n == 0) {
     h += "<p style='color:#888'>暂无从机接入</p>";
   }
   for (int i = 0; i < n; i++) {
     IPAddress ip = m_dist->slaveIP(i);
-    h += "<div class='sl'><div class='row'><b>从机 #" + String(i + 1) + "</b>"
-         "<small>" + ip.toString() + "</small></div>";
-    h += "<div class='row'><span>音量 <span id='v" + String(i) + "'>100</span>%</span>"
-         "<small><a href='javascript:void(0)' onclick='setVol(" + String(i) + ",100)' style='color:#8ab4ff'>100</a> "
-         "<a href='javascript:void(0)' onclick='setVol(" + String(i) + ",50)' style='color:#8ab4ff'>50</a> "
-         "<a href='javascript:void(0)' onclick='setVol(" + String(i) + ",0)' style='color:#8ab4ff'>0</a></small></div>";
-    h += "<input type='range' min='0' max='100' value='100' id='vol" + String(i) + "' "
+    String ipStr = ip.toString();
+    // 从机回报的状态（心跳驱动）
+    bool online = m_dist->slaveOnline(i);
+    String dot = online ? "<span style='color:#2ecc71'>●</span>" : "<span style='color:#555'>○</span>";
+    String state = "?";
+    int curVol = 100;
+    String extra = "";
+    if (du) {
+      const DistributeUDP::SlaveState* st = du->slaveState(i);
+      if (st) {
+        curVol = st->vol;
+        state = st->playing ? "▶出声" : "⏹";
+        extra = " 缓冲" + String(st->ringKB) + "KB";
+      }
+    }
+    h += "<div class='sl' data-idx='" + String(i) + "' data-ip='" + ipStr + "'><div class='row'><b>" + dot + " 从机 #" + String(i + 1) + "</b>"
+         "<small>" + ipStr + " · " + state + extra + "</small></div>";
+    h += "<div class='row'><span>音量 <span id='v" + String(i) + "'>" + String(curVol) + "</span>%</span>"
+         "<small><a href='javascript:void(0)' onclick='setVol(this," + String(i) + ",100)' style='color:#8ab4ff'>100</a> "
+         "<a href='javascript:void(0)' onclick='setVol(this," + String(i) + ",50)' style='color:#8ab4ff'>50</a> "
+         "<a href='javascript:void(0)' onclick='setVol(this," + String(i) + ",0)' style='color:#8ab4ff'>0</a></small></div>";
+    h += "<input type='range' min='0' max='100' value='" + String(curVol) + "' id='vol" + String(i) + "' "
          "oninput='document.getElementById(\"v" + String(i) + "\").innerHTML=this.value' "
-         "onchange='setVol(" + String(i) + ",this.value)'>";
-    h += "<div class='row'><span>延迟 <span id='d" + String(i) + "'>0</span> ms</span></div>";
-    h += "<input type='number' min='0' max='5000' step='10' value='0' id='dly" + String(i) + "' "
+         "onchange='setVol(this," + String(i) + ",this.value)'>";
+    h += "<div class='row'><span>延迟 <span id='d" + String(i) + "'>" + String(du && du->slaveState(i) ? du->slaveState(i)->delayMs : 0) + "</span> ms</span></div>";
+    h += "<input type='number' min='0' max='5000' step='10' value='" + String(du && du->slaveState(i) ? du->slaveState(i)->delayMs : 0) + "' id='dly" + String(i) + "' "
          "oninput='document.getElementById(\"d" + String(i) + "\").innerHTML=this.value' "
-         "onchange='setDly(" + String(i) + ",this.value)'>";
+         "onchange='setDly(this," + String(i) + ",this.value)'>";
     h += "</div>";
   }
 
-  h += "<script>var IPS=[" ;
-  for (int i = 0; i < n; i++) {
-    if (i) h += ",";
-    h += "'" + m_dist->slaveIP(i).toString() + "'";
-  }
-  h += "];"
-       "function setVol(i,v){var ip=IPS[i];if(!ip)return;"
+  h += "<script>"
+       "function setVol(el,i,v){var ip=el.closest('.sl').getAttribute('data-ip');if(!ip)return;"
        "fetch('/slave/ctl',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
        "body:'ip='+ip+'&vol='+v});}"
-       "function setDly(i,d){var ip=IPS[i];if(!ip)return;"
+       "function setDly(el,i,d){var ip=el.closest('.sl').getAttribute('data-ip');if(!ip)return;"
        "fetch('/slave/ctl',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},"
        "body:'ip='+ip+'&dly='+d});}"
-       "setInterval(function(){location.reload();},30000);</script>";
+       "function allMute(){document.querySelectorAll('.sl').forEach(function(sl){"
+       "var ip=sl.getAttribute('data-ip');if(ip)fetch('/slave/ctl',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ip='+ip+'&vol=0'});});}"
+       "function allRestore(){document.querySelectorAll('.sl').forEach(function(sl){"
+       "var ip=sl.getAttribute('data-ip');if(ip)fetch('/slave/ctl',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'ip='+ip+'&vol=100'});});}"
+       "setInterval(function(){location.reload();},5000);</script>";
   h += "</body></html>";
   m_server.send(200, "text/html; charset=utf-8", h);
 }
@@ -238,6 +276,9 @@ void ControlPanel::handleSlaveCtl() {
   String ipStr = m_server.arg("ip");
   String volStr = m_server.arg("vol");
   String dlyStr = m_server.arg("dly");
+  // 无条件先打日志：确认 handler 被调用 + 收到的参数
+  Serial.printf("[CTL] ip=%s vol=%s dly=%s\n",
+                ipStr.c_str(), volStr.c_str(), dlyStr.c_str());
   IPAddress ip;
   if (!ip.fromString(ipStr) || !m_dist) {
     m_server.send(400, "text/plain", "bad ip");
